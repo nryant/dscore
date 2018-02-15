@@ -141,7 +141,7 @@ def validate_rttm(rttmf):
         speaker_ids = set()
         error_messages = []
         for line in f:
-            if line.startswith('SPKR-INFO'):
+            if line.startswith(b'SPKR-INFO'):
                 continue
             try:
                 turn = _parse_rttm_line(line)
