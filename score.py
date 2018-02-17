@@ -259,7 +259,7 @@ if __name__ == '__main__':
     if args.ref_rttm_scpf is not None:
         args.ref_rttm_fns = load_script_file(args.ref_rttm_scpf)
     if args.sys_rttm_scpf is not None:
-        args.sys_rttm_fns = load_script_file(args.ref_rttm_scpf)
+        args.sys_rttm_fns = load_script_file(args.sys_rttm_scpf)
     if len(args.ref_rttm_fns) < 1:
         error('No reference RTTMs specified.')
         sys.exit(1)
