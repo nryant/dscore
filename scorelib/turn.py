@@ -7,7 +7,7 @@ from collections import defaultdict
 from intervaltree import IntervalTree
 
 from .six import iterkeys, python_2_unicode_compatible
-from .utils import clip, warn, xor
+from .utils import clip, groupby, warn, xor
 
 __all__ = ['merge_turns', 'trim_turns', 'Turn']
 
@@ -75,35 +75,27 @@ class Turn(object):
 
 def merge_turns(turns):
     """Merge overlapping turns by same speaker within each file."""
-    # Split turns by file and speaker.
-    turn_map = defaultdict(list)
-    file_to_speakers = defaultdict(set)
-    for turn in turns:
-        turn_map[(turn.file_id, turn.speaker_id)].append(turn)
-        file_to_speakers[turn.file_id].add(turn.speaker_id)
-
     # Merge separately within each file and for each speaker.
     new_turns = []
-    file_ids = set([file_id for file_id, _ in iterkeys(turn_map)])
-    for file_id in sorted(file_ids):
-        for speaker_id in sorted(file_to_speakers[file_id]):
-            speaker_turns = turn_map[(file_id, speaker_id)]
-            speaker_it = IntervalTree.from_tuples(
-                [(turn.onset, turn.offset) for turn in speaker_turns])
-            n_turns_pre = len(speaker_it)
-            speaker_it.merge_overlaps()
-            n_turns_post = len(speaker_it)
-            if n_turns_post < n_turns_pre:
-                speaker_turns = []
-                for intrvl in speaker_it:
-                    speaker_turns.append(
-                        Turn(intrvl.begin, intrvl.end, speaker_id=speaker_id,
-                             file_id=file_id))
-                speaker_turns = sorted(
-                    speaker_turns, key=lambda x: (x.onset, x.offset))
-                warn('Merging overlapping speaker turns. '
-                     'FILE: %s, SPEAKER: %s' % (file_id, speaker_id))
-            new_turns.extend(speaker_turns)
+    for (file_id, speaker_id), speaker_turns in groupby(
+            turns, lambda x: (x.file_id, x.speaker_id)):
+        speaker_turns = list(speaker_turns)
+        speaker_it = IntervalTree.from_tuples(
+            [(turn.onset, turn.offset) for turn in speaker_turns])
+        n_turns_pre = len(speaker_it)
+        speaker_it.merge_overlaps()
+        n_turns_post = len(speaker_it)
+        if n_turns_post < n_turns_pre:
+            speaker_turns = []
+            for intrvl in speaker_it:
+                speaker_turns.append(
+                    Turn(intrvl.begin, intrvl.end, speaker_id=speaker_id,
+                         file_id=file_id))
+            speaker_turns = sorted(
+                speaker_turns, key=lambda x: (x.onset, x.offset))
+            warn('Merging overlapping speaker turns. '
+                 'FILE: %s, SPEAKER: %s' % (file_id, speaker_id))
+        new_turns.extend(speaker_turns)
     turns = new_turns
 
     return turns
@@ -159,8 +151,8 @@ def trim_turns(turns, uem=None, score_onset=None, score_offset=None):
         turn_onset = clip(turn.onset, score_onset, score_offset)
         turn_offset = clip(turn.offset, score_onset, score_offset)
         if turn.onset != turn_onset or turn.offset != turn_offset:
-            warn('Truncating turn extending past UEM scoring region '
-                 '[%.3f, %.3f]. TURN: %s' % (score_onset, score_offset, turn))
+            warn('Truncating turn overlapping non-scoring region. TURN: %s ' %
+                 turn)
         if turn_offset <= turn_onset:
             continue
         new_turns.append(Turn(
