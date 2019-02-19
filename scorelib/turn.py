@@ -2,12 +2,12 @@
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import unicode_literals
-from collections import defaultdict
 
-from intervaltree import IntervalTree
+from intervaltree import Interval, IntervalTree
 
-from .six import iterkeys, python_2_unicode_compatible
-from .utils import clip, groupby, warn, xor
+from .six import python_2_unicode_compatible
+from .uem import UEM
+from .utils import groupby, warn, xor
 
 __all__ = ['merge_turns', 'trim_turns', 'Turn']
 
@@ -59,6 +59,18 @@ class Turn(object):
         self.speaker_id = speaker_id
         self.file_id = file_id
 
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__dict__ == other.__dict__
+        return False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash((self.onset, self.offset, self.dur, self.file_id,
+                     self.speaker_id))
+
     def __str__(self):
         return ('FILE: %s, SPEAKER: %s, ONSET: %f, OFFSET: %f, DUR: %f' %
                 (self.file_id, self.speaker_id, self.onset, self.offset,
@@ -96,10 +108,72 @@ def merge_turns(turns):
             warn('Merging overlapping speaker turns. '
                  'FILE: %s, SPEAKER: %s' % (file_id, speaker_id))
         new_turns.extend(speaker_turns)
-    turns = new_turns
+    return new_turns
 
-    return turns
 
+def chop_tree(tree, onset, offset):
+    """Trim Intervals so that none overlap [``onset``, ``offset``].
+
+    Intervals contained entirely within the chopped region are removed and
+    those overlapping, but not contained are trimmed back. Differs from
+    ``IntervalTree.chop`` in that it keeps track of which intervals in the
+    tree were affected.
+
+    This is an inplace operation.
+
+    Parameters
+    ----------
+    tree : IntervalTree
+        Interval tree.
+
+    onset : float
+        Onset of chopped region.
+
+    offset : float
+        Offset of chopped region.
+
+    Returns
+    -------
+    affected_intervals : set of Interval
+        Intervals from ``tree`` that overlap chopped region.
+    """
+    overlapped_intervals = set() # Intervals overlapping chopped region.
+    insertions = set() # Intervals to add.
+
+    # Identify intervals contained entirely within [onset, offset].
+    overlapped_intervals.update(tree.envelop(onset, offset))
+
+    # Identify all other intervals overlapping [onset, offset]. These belong
+    # to two classes:
+    # - right overlap  --  interval.begin < onset
+    # - left overlap  --  offset < interval.end
+    for intrvl in tree.at(onset):
+        if intrvl.begin >= onset:
+            continue
+        overlap_dur = intrvl.end - onset
+        if not overlap_dur:
+            continue
+        overlapped_intervals.add(intrvl)
+        insertions.add(Interval(intrvl.begin, onset, intrvl.data))
+    for intrvl in tree.at(offset):
+        if intrvl.end <= offset:
+            continue
+        overlap_dur = offset - intrvl.begin
+        if not overlap_dur:
+            continue
+        overlapped_intervals.add(intrvl)
+        insertions.add(Interval(offset, intrvl.end, intrvl.data))
+
+    # Update tree.
+    for intrvl in overlapped_intervals:
+        tree.discard(intrvl)
+    tree.update(insertions)
+
+    return overlapped_intervals
+
+
+MAX_SESSION_DUR = 1e6 # Maximum duration (seconds) of session. Any outlandishly
+                      # high number will do.
 
 def trim_turns(turns, uem=None, score_onset=None, score_offset=None):
     """Trim turns to scoring regions defined in UEM.
@@ -128,6 +202,7 @@ def trim_turns(turns, uem=None, score_onset=None, score_offset=None):
     trimmed_turns : list of Turn
         Trimmed turns.
     """
+    # Validate arguments.
     if uem is not None:
         if not (score_onset is None and score_offset is None):
             raise ValueError('Either uem or score_onset and score_offset must '
@@ -141,21 +216,44 @@ def trim_turns(turns, uem=None, score_onset=None, score_offset=None):
         if score_offset <= score_onset:
             raise ValueError('Scoring region duration must be > 0 seconds')
 
+    # If no UEM provided, set each file to have same scoring region:
+    # (score_onset, score_offset).
+    if uem is None:
+        file_ids = set([turn.file_id for turn in turns])
+        uem = UEM({fid : [(score_onset, score_offset)] for fid in file_ids})
+
+    # Trim turns to scoring regions.
     new_turns = []
-    for turn in turns:
-        if uem is not None:
-            if turn.file_id not in uem:
+    for file_id, file_turns in groupby(turns, lambda x: x.file_id):
+        if file_id not in uem:
+            for turn in file_turns:
                 warn('Skipping turn from file not in UEM. TURN: %s' % turn)
-                continue
-            score_onset, score_offset = uem[turn.file_id]
-        turn_onset = clip(turn.onset, score_onset, score_offset)
-        turn_offset = clip(turn.offset, score_onset, score_offset)
-        if turn.onset != turn_onset or turn.offset != turn_offset:
-            warn('Truncating turn overlapping non-scoring region. TURN: %s ' %
-                 turn)
-        if turn_offset <= turn_onset:
             continue
-        new_turns.append(Turn(
-            turn_onset, turn_offset, speaker_id=turn.speaker_id,
-            file_id=turn.file_id))
+
+        # Remove overlaps with no score regions.
+        noscore_tree = IntervalTree.from_tuples([(0.0, MAX_SESSION_DUR)])
+        for score_onset, score_offset in uem[file_id]:
+            noscore_tree.chop(score_onset, score_offset)
+        turns_tree = IntervalTree.from_tuples(
+            (turn.onset, turn.offset, turn) for turn in file_turns)
+        overlapped_turns = set() # Turns found to overlap a no score region.
+        for noscore_intrvl in noscore_tree:
+            overlapped_intrvls = chop_tree(
+                turns_tree, noscore_intrvl.begin, noscore_intrvl.end)
+            overlapped_turns.update(
+                [intrvl.data for intrvl in overlapped_intrvls])
+
+        # Convert interval tree to turns.
+        for intrvl in turns_tree:
+            orig_turn = intrvl.data
+            new_turns.append(Turn(
+                intrvl.begin, intrvl.end, speaker_id=orig_turn.speaker_id,
+                file_id=orig_turn.file_id))
+
+        # Report any overlapping turns to STDERR.
+        for turn in sorted(
+                overlapped_turns, key=lambda x: (x.onset, x.offset)):
+            warn('Truncating turn overlapping non-scoring region. TURN: %s' %
+                 turn)
+
     return new_turns
