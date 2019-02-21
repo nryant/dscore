@@ -12,6 +12,9 @@ from .utils import groupby, warn, xor
 __all__ = ['merge_turns', 'trim_turns', 'Turn']
 
 
+# TODO: intervaltree is pure Python and a bit of a bottleneck. Explore
+#       alternatives.
+
 @python_2_unicode_compatible
 class Turn(object):
     """Speaker turn class.

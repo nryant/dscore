@@ -3,19 +3,19 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
-from collections import defaultdict
+from collections import namedtuple
 
 import numpy as np
 from scipy.linalg import block_diag
 
 from . import metrics
-from .six import iteritems, itervalues, python_2_unicode_compatible
+from .six import iteritems, itervalues
+from .utils import groupby
 
-__all__ = ['score', 'turns_to_frames']
+__all__ = ['flatten_labels', 'score', 'turns_to_frames', 'Scores']
 
 
-def turns_to_frames(turns, score_onset, score_offset, step=0.010,
-                    as_string=False):
+def turns_to_frames(turns, score_regions, step=0.010):
     """Return frame-level labels corresponding to diarization.
 
     Parameters
@@ -23,29 +23,21 @@ def turns_to_frames(turns, score_onset, score_offset, step=0.010,
     turns : list of Turn
         Speaker turns. Should all be from single file.
 
-    score_onset : float
-        Scoring region onset in seconds from beginning of file.
-
-    score_offset : float
-        Scoring region offset in seconds from beginning of file.
+    score_regions : list of tuple
+        Scoring regions from UEM.
 
     step : float, optional
-        Frame step size  in seconds.
+        Frame step size in seconds.
         (Default: 0.01)
-
-    as_string : bool, optional
-        If True, returned frame labels will be strings that are the class
-        names. Else, they will be integers.
 
     Returns
     -------
-    labels : ndarray, (n_frames,)
-        Frame-level labels.
+    labels : ndarray, (n_frames, n_speakers)
+        Frame-level labels. The ``i,j``-th entry of this array is 1 if speaker
+        ``j``-th speaker was present at frame ``i`` and 0 otherwise. If no
+        speaker turns were passed, the second dimension will be 0.
     """
-    file_ids = set([turn.file_id for turn in turns])
-    if score_offset <= score_onset:
-        raise ValueError('score_onset must be less than score_offset: '
-                         '%.3f >= %.3f' % (score_onset, score_offset))
+    file_ids = {turn.file_id for turn in turns}
     if len(file_ids) > 1:
         raise ValueError('Turns should be from a single file.')
 
@@ -56,45 +48,68 @@ def turns_to_frames(turns, score_onset, score_offset, step=0.010,
     speaker_ids = [turn.speaker_id for turn in turns]
     speaker_classes, speaker_class_inds = np.unique(
         speaker_ids, return_inverse=True)
-    speaker_classes = np.concatenate([speaker_classes, ['non-speech']])
-    dur = score_offset - score_onset
+    dur = max(score_offset for score_onset, score_offset in score_regions)
     n_frames = int(dur/step)
-    X = np.zeros((n_frames, speaker_classes.size), dtype='bool')
-    times = score_onset + step*np.arange(n_frames)
+    X = np.zeros((n_frames, speaker_classes.size), dtype='int32')
+    times = step*np.arange(n_frames)
     bis = np.searchsorted(times, onsets)
     eis = np.searchsorted(times, offsets)
     for bi, ei, speaker_class_ind in zip(bis, eis, speaker_class_inds):
-        X[bi:ei, speaker_class_ind] = True
-    is_nil = ~(X.any(axis=1))
-    X[is_nil, -1] = True
+        X[bi:ei, speaker_class_ind] = 1
 
-    # Now, convert to frame-level labelings.
-    pows = 2**np.arange(X.shape[1])
-    labels = np.sum(pows*X, axis=1)
-    if as_string:
-        def speaker_mask(n):
-            return [bool(int(x))
-                    for x in np.binary_repr(n, speaker_classes.size)][::-1]
-        label_classes = np.array(['_'.join(speaker_classes[speaker_mask(n)])
-                                  for n in range(2**speaker_classes.size)])
-        try:
-            # Save some memory in the (majority of) cases where speaker ids are
-            # ASCII.
-            label_classes = label_classes.astype('string')
-        except UnicodeEncodeError:
-            pass
-        labels = label_classes[labels]
-    return labels
+    # Eliminate frames belonging to non-score regions.
+    keep = np.zeros(len(X), dtype=bool)
+    for score_onset, score_offset in score_regions:
+        bi, ei = np.searchsorted(times, (score_onset, score_offset))
+        keep[bi:ei] = True
+    X = X[keep, ]
+
+    return X
 
 
-@python_2_unicode_compatible
-class Scores(object):
+def flatten_labels(labels):
+    """Helper function to convert output of ``turns_to_frames`` to 1-D array of
+    unique values.
+
+    Each row of ``labels`` is mapped to an integer representing an element of
+    the powerset ``2**n_speakers``. The result is a 1-D array of integer labels
+    in which each speaker, each possible overlap of speakers, and non-speech
+    are differentiated. This is a necessary pre-processing step for the
+    clustering metrics.
+
+    Parameters
+    ---------
+    labels : ndarray, (n_frames, n_speakers)
+        Frame-level speaker labels. The ``i,j``-th entry of this array is 1
+        if speaker ``j``-th speaker was present at frame ``i`` and 0 otherwise.
+
+    Returns
+    -------
+    flattened_labels : ndarray, (n_frames,)
+        Flattened frame labels..
+    """
+    pows = 2**np.arange(labels.shape[1])
+    flattened_labels = np.sum(pows*labels, axis=1)
+    return flattened_labels
+
+
+class Scores(namedtuple(
+        'Scores',
+        ['file_id', 'der', 'jer', 'bcubed_precision', 'bcubed_recall',
+         'bcubed_f1', 'tau_ref_sys', 'tau_sys_ref', 'ce_ref_sys',
+         'ce_sys_ref', 'mi', 'nmi'])):
     """Structure containing metrics.
 
     Parameters
     ----------
+    file_id : str
+        File id for file scored.
+
     der : float
         Diarization error rate in percent.
+
+    jer : float
+        Jaccard error rate in percent.
 
     bcubed_precision : float
         B-cubed precision.
@@ -131,30 +146,10 @@ class Scores(object):
     nmi : float
         Normalized mutual information.
     """
-    def __init__(self, der, bcubed_precision, bcubed_recall, bcubed_f1,
-                 tau_ref_sys, tau_sys_ref, ce_ref_sys, ce_sys_ref, mi, nmi):
-        self.der = der
-        self.bcubed_precision = bcubed_precision
-        self.bcubed_recall = bcubed_recall
-        self.bcubed_f1 = bcubed_f1
-        self.tau_ref_sys = tau_ref_sys
-        self.tau_sys_ref = tau_sys_ref
-        self.ce_ref_sys = ce_ref_sys
-        self.ce_sys_ref = ce_sys_ref
-        self.mi = mi
-        self.nmi = nmi
-
-    def __str__(self):
-        return ('DER: %.2f, B-cubed precision: %.2f, B-cubed recall: %.2f, '
-                'B-cubed F1: %.2f, GKT(ref, sys): %.2f, GKT(sys, ref): %.2f, '
-                'CE(ref|sys): %.2f, CE(sys|ref): %.2f, MI: %.2f, NMI: %.2f' %
-                (self.der, self.bcubed_precision, self.bcubed_recall,
-                 self.bcubed_f1, self.tau_ref_sys, self.tau_sys_ref,
-                 self.ce_ref_sys, self.ce_sys_ref, self.mi, self.nmi))
+    __slots__ = ()
 
 
-def score(ref_turns, sys_turns, uem, der_collar=0.0,
-          der_ignore_overlaps=True, step=0.010, nats=False):
+def score(ref_turns, sys_turns, uem, step=0.010, nats=False, **kwargs):
     """Score diarization.
 
     Parameters
@@ -168,17 +163,6 @@ def score(ref_turns, sys_turns, uem, der_collar=0.0,
     uem : UEM
         Un-partitioned evaluation map.
 
-    der_collar : float, optional
-        Size of forgiveness collar in seconds to use in computing Diarization
-        Erro Rate (DER). Diarization output will not be evaluated within +/-
-        ``collar`` seconds of reference speaker boundaries.
-        (Default: 0.0)
-
-    der_ignore_overlaps : bool, optional
-        If True, ignore regions in the reference diarization in which more
-        than one speaker is speaking when computing DER.
-        (Default: True)
-
     step : float, optional
         Frame step size  in seconds. Not relevant for computation of DER.
         (Default: 0.01)
@@ -188,35 +172,56 @@ def score(ref_turns, sys_turns, uem, der_collar=0.0,
         Otherwise, use bits.
         (Default: False)
 
+    kwargs
+        Keyword arguments to be passed to ``metrics.der``.
+
     Returns
     -------
-    file_to_scores : dict
-        Mapping from file ids in ``uem`` to ``Scores`` instances.
+    file_scores : list of Scores
+        Scores for all files.
 
     global_scores : Scores
         Global scores.
     """
-    def groupby(turns):
-        file_to_turns = defaultdict(list)
-        for turn in turns:
-            file_to_turns[turn.file_id].append(turn)
-        return file_to_turns
-    file_to_ref_turns = groupby(ref_turns)
-    file_to_sys_turns = groupby(sys_turns)
-
     # Build contingency matrices.
-    file_to_cm = {}
-    for file_id, (score_onset, score_offset) in iteritems(uem):
+    file_to_ref_turns = {
+        fid : list(g) for fid, g in groupby(ref_turns, lambda x: x.file_id)}
+    file_to_sys_turns = {
+        fid : list(g) for fid, g in groupby(sys_turns, lambda x: x.file_id)}
+    file_to_cm = {} # Map from files to contingency matrices used by
+                    # clustering metrics.
+    file_to_jer_cm = {} # Map from files to contingency matrices used by
+                        # JER.
+    file_to_ref_durs = {} # Map from files to speaker durations in reference
+                          # segmentation.
+    file_to_sys_durs = {} # Map from files to speaker durations in system
+                          # segmentation.
+    for file_id, score_regions in iteritems(uem):
         ref_labels = turns_to_frames(
-            file_to_ref_turns[file_id], score_onset, score_offset, step=step)
+            file_to_ref_turns[file_id], score_regions, step=step)
         sys_labels = turns_to_frames(
-            file_to_sys_turns[file_id], score_onset, score_offset, step=step)
-        file_to_cm[file_id], _, _ = metrics.contingency_matrix(
+            file_to_sys_turns[file_id], score_regions, step=step)
+        file_to_ref_durs[file_id] = ref_labels.sum(axis=0)
+        file_to_sys_durs[file_id] = sys_labels.sum(axis=0)
+        file_to_jer_cm[file_id] = metrics.contingency_matrix(
             ref_labels, sys_labels)
+        file_to_cm[file_id] = metrics.contingency_matrix(
+            flatten_labels(ref_labels), flatten_labels(sys_labels))
     global_cm = block_diag(*list(itervalues(file_to_cm)))
+    # Above line has the undesirable property of claiming silence on
+    # different files is a different category. However, leave it in for
+    # consistency with how the clustering metrics were computed in DIHARD I.
 
-    # Score.
-    def compute_metrics(cm):
+    # Compute DER. This bit is slow as it relies on NIST's perl script.
+    file_to_der, global_der = metrics.der(
+        ref_turns, sys_turns, uem=uem, **kwargs)
+
+    # Compute JER.
+    file_to_jer, global_jer = metrics.jer(
+        file_to_ref_durs, file_to_sys_durs, file_to_jer_cm)
+
+    # Compute clustering metrics.
+    def compute_metrics(fid, cm, der, jer):
         bcubed_precision, bcubed_recall, bcubed_f1 = metrics.bcubed(
             None, None, cm)
         tau_ref_sys, tau_sys_ref = metrics.goodman_kruskal_tau(
@@ -224,17 +229,14 @@ def score(ref_turns, sys_turns, uem, der_collar=0.0,
         ce_ref_sys = metrics.conditional_entropy(None, None, cm, nats)
         ce_sys_ref = metrics.conditional_entropy(None, None, cm.T, nats)
         mi, nmi = metrics.mutual_information(None, None, cm, nats)
-        return Scores(None, bcubed_precision, bcubed_recall, bcubed_f1,
-                      tau_ref_sys, tau_sys_ref, ce_ref_sys, ce_sys_ref,
-                      mi, nmi)
-    file_to_der, global_der = metrics.der(
-        ref_turns, sys_turns, der_collar, der_ignore_overlaps, uem)
-    file_to_scores = {}
+        return Scores(
+            fid, der, jer, bcubed_precision, bcubed_recall, bcubed_f1,
+            tau_ref_sys, tau_sys_ref, ce_ref_sys, ce_sys_ref, mi, nmi)
+    file_scores = []
     for file_id, cm in iteritems(file_to_cm):
-        scores = compute_metrics(cm)
-        scores.der = file_to_der[file_id]
-        file_to_scores[file_id] = scores
-    global_scores = compute_metrics(global_cm)
-    global_scores.der = global_der
+        file_scores.append(compute_metrics(
+            file_id, cm, file_to_der[file_id], jer=file_to_jer[file_id]))
+    global_scores = compute_metrics(
+        '*** OVERALL ***', global_cm, global_der, global_jer)
 
-    return file_to_scores, global_scores
+    return file_scores, global_scores
