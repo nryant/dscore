@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 
 import numpy as np
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, issparse
 
 from .rttm import write_rttm
 from .uem import gen_uem, write_uem
@@ -24,18 +24,49 @@ EPS = np.finfo(float).eps
 
 
 def contingency_matrix(ref_labels, sys_labels):
-    """Return contingency matrix between ``ref_labels`` and ``sys_labels``."""
-    ref_classes, ref_class_inds = np.unique(ref_labels, return_inverse=True)
-    sys_classes, sys_class_inds = np.unique(sys_labels, return_inverse=True)
-    n_frames = ref_labels.size
-    # Following works because coo_matrix sums duplicate entries. Is roughly
-    # twice as fast as np.histogram2d.
-    cmatrix = coo_matrix(
-        (np.ones(n_frames), (ref_class_inds, sys_class_inds)),
-        shape=(ref_classes.size, sys_classes.size),
-        dtype=np.int)
-    cmatrix = cmatrix.toarray()
-    return cmatrix, ref_classes, sys_classes
+    """Return contingency matrix between ``ref_labels`` and ``sys_labels``.
+
+    Parameters
+    ----------
+    ref_labels : ndarray, (n_samples,) or (n_samples, n_ref_classes)
+        Reference labels encoded using one-hot scheme.
+
+    sys_labels : ndarray, (n_samples,) or ((n_samples, n_sys_classes)
+        System labels encoded using one-hot scheme.
+
+    Returns
+    -------
+    cm : ndarray, (n_ref_classes, n_sys_classes)
+        Contigency matrix whose ``i, j``-th entry is the number of times the
+        ``i``-th reference label and ``j``-th system label co-occur.
+    """
+    if ref_labels.ndim != sys_labels.ndim:
+        raise ValueError(
+            'ref_labels and sys_labels should either both be 1D arrays of '
+            'labels or both be 2D arrays of one-hot encoded labels: shapes '
+            'are %r, %r' % (ref_labels.shape, sys_labels.shape))
+    if ref_labels.shape[0] != sys_labels.shape[0]:
+        raise ValueError(
+            'ref_labels and sys_labels must have same size: received %d '
+            'and %d' % (ref_labels.shape[0], sys_labels.shape[0]))
+    if ref_labels.ndim == 1:
+        ref_classes, ref_class_inds = np.unique(
+            ref_labels, return_inverse=True)
+        sys_classes, sys_class_inds = np.unique(
+            sys_labels, return_inverse=True)
+        n_frames = ref_labels.size
+        cm = coo_matrix(
+            (np.ones(n_frames), (ref_class_inds, sys_class_inds)),
+            shape=(ref_classes.size, sys_classes.size),
+            dtype=np.int)
+        cm = cm.toarray()
+    else:
+        ref_labels = ref_labels.astype('int64', copy=False)
+        sys_labels = sys_labels.astype('int64', copy=False)
+        cm = ref_labels.T.dot(sys_labels)
+        if issparse(cm):
+            cm = cm.toarray()
+    return cm
 
 
 def bcubed(ref_labels, sys_labels, cm=None):
@@ -80,7 +111,7 @@ def bcubed(ref_labels, sys_labels, cm=None):
     chains." Proceedings of LREC 1998.
     """
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
     cm = cm.astype('float64')
     cm_norm = cm / cm.sum()
     precision = np.sum(cm_norm * (cm / cm.sum(axis=0)))
@@ -127,7 +158,7 @@ def goodman_kruskal_tau(ref_labels, sys_labels, cm=None):
       Variables. https://CRAN.R-project.org/package=GoodmanKruskal.
     """
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
     cm = cm.astype('float64')
     cm = cm / cm.sum()
     ref_marginals = cm.sum(axis=1)
@@ -196,7 +227,7 @@ def conditional_entropy(ref_labels, sys_labels, cm=None, nats=False):
     """
     log = np.log if nats else np.log2
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
     sys_marginals = cm.sum(axis=0)
     N = cm.sum()
     ref_inds, sys_inds = np.nonzero(cm)
@@ -273,7 +304,7 @@ def mutual_information(ref_labels, sys_labels, cm=None, nats=False,
         raise ValueError('"%s" is not a valid NMI normalization method.')
     log = np.log if nats else np.log2
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
 
     # Special cases in which one or more of H(ref) and H(sys) is
     # 0.
@@ -282,7 +313,7 @@ def mutual_information(ref_labels, sys_labels, cm=None, nats=False,
         # Case 1: MI is by definition 0 as should be NMI, regardless of
         #         normalization.
         return 0.0, 0.0
-    elif n_ref_classes == n_sys_classes == 1:
+    if n_ref_classes == n_sys_classes == 1:
         # Case 2: MI is 0, but as the data is not split, each clustering
         #         is perfectly predictive of the other, so set NMI to 1.
         return 0.0, 1.0
