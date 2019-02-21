@@ -2,15 +2,18 @@
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import unicode_literals
+import itertools
 import os
 
 import numpy as np
-from numpy.testing import assert_almost_equal, assert_equal, assert_raises_regex
-import pytest
+from numpy.testing import (assert_almost_equal, assert_equal,
+                           assert_raises_regex)
 
 from scorelib.metrics import (bcubed, conditional_entropy, contingency_matrix,
-                              der, goodman_kruskal_tau, mutual_information)
+                              der, jer, goodman_kruskal_tau,
+                              mutual_information)
 from scorelib.rttm import load_rttm
+from scorelib.score import turns_to_frames
 
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -123,3 +126,56 @@ def test_der():
     file_to_der, global_der = der(ref_turns, sys_turns)
     assert_almost_equal(file_to_der['FILE1'], expected_der, 3)
     assert_almost_equal(global_der, expected_der, 3)
+
+
+def test_jer():
+    # Check input validation.
+    with assert_raises_regex(
+            ValueError, 'All passed dicts must have same'):
+        jer(dict(), dict(F1=np.zeros(1)), dict())
+        jer(dict(F1=np.zeros(1)), dict(), dict())
+        jer(dict(), dict(), dict(F1=np.zeros(1)))
+
+    # Edge case: no reference speech.
+    ref_durs = np.array([], dtype='int64')
+    sys_durs = np.array([5, 5], dtype='int64')
+    cm = np.zeros((0, 2), dtype='int64')
+    file_to_jer, global_jer = jer(
+        dict(F=ref_durs), dict(F=sys_durs), dict(F=cm))
+    assert file_to_jer['F'] == 100.
+    assert global_jer == 100.
+
+    # Edge case: no system speech.
+    ref_durs = np.array([5, 5], dtype='int64')
+    sys_durs = np.array([], dtype='int64')
+    cm = np.zeros((2, 0), dtype='int64')
+    file_to_jer, global_jer = jer(
+        dict(F=ref_durs), dict(F=sys_durs), dict(F=cm))
+    assert file_to_jer['F'] == 100.
+    assert global_jer == 100.
+
+    # Edge case: no reference OR system speech.
+    ref_durs = np.array([], dtype='int64')
+    sys_durs = np.array([], dtype='int64')
+    cm = np.zeros([], dtype='int64')
+    file_to_jer, global_jer = jer(
+        dict(F=ref_durs), dict(F=sys_durs), dict(F=cm))
+    assert file_to_jer['F'] == 0.
+    assert global_jer == 0.
+
+    # Real data.
+    ref_turns, _, _ = load_rttm(
+        os.path.join(TEST_DIR, 'ref.rttm'))
+    sys_turns, _, _ = load_rttm(
+        os.path.join(TEST_DIR, 'sys.rttm'))
+    dur = 1 + max(turn.offset
+                  for turn in itertools.chain(ref_turns, sys_turns))
+    ref_labels = turns_to_frames(ref_turns, [(0, dur)], step=0.01)
+    sys_labels = turns_to_frames(sys_turns, [(0, dur)], step=0.01)
+    cm = contingency_matrix(ref_labels, sys_labels)
+    ref_durs = ref_labels.sum(axis=0)
+    sys_durs = sys_labels.sum(axis=0)
+    file_to_jer, global_jer = jer(
+        dict(FILE1=ref_durs), dict(FILE1=sys_durs), dict(FILE1=cm))
+    assert_almost_equal(file_to_jer['FILE1'], 33.24631, 3)
+    assert_almost_equal(global_jer, 33.24631, 3)

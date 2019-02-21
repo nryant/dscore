@@ -1,4 +1,5 @@
 """Functions for scoring frame-level diarization output."""
+# TODO: Module is too long. Refactor.
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -10,6 +11,7 @@ import subprocess
 import tempfile
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from scipy.sparse import coo_matrix, issparse
 
 from .rttm import write_rttm
@@ -17,7 +19,7 @@ from .uem import gen_uem, write_uem
 from .utils import clip, xor
 
 __all__ = ['bcubed', 'conditional_entropy', 'contingency_matrix', 'der',
-           'goodman_kruskal_tau', 'mutual_information']
+           'goodman_kruskal_tau', 'jer', 'mutual_information']
 
 
 EPS = np.finfo(float).eps
@@ -419,8 +421,12 @@ def der(ref_turns, sys_turns, collar=0.0, ignore_overlaps=False, uem=None):
 
     Returns
     -------
-    der : float
-        Overall percent diarization error.
+    file_to_der : dict
+        Mapping from files to diarization error rates (in percent) for those
+        files.
+
+    global_der : float
+        Overall diarization error rate (in percent).
 
     References
     ----------
@@ -497,3 +503,125 @@ def der(ref_turns, sys_turns, collar=0.0, ignore_overlaps=False, uem=None):
     global_der = file_to_der_base['ALL']
 
     return file_to_der, global_der
+
+
+def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
+    """Return Jacard error rate.
+
+    Jaccard error rate (JER) rate is based on the Jaccard index, a similarity
+    measure used to evaluate the output of image segmentation systems. An
+    optimal mapping between reference and system speakers is determined and
+    for each pair the Jaccard index is computed. The Jaccard error rate is then
+    defined as 1 minus the average of these scores.
+
+    More concretely, assume we have ``N`` reference speakers and ``M`` system
+    speakers. An optimal mapping between speakers is determined using the
+    Hungarian algorithm so that each reference speaker is paired with at most
+    one system speaker and each system speaker with at most one reference
+    speaker. Then, for each reference speaker ``ref` the speaker-specific
+    Jaccard error rate is ``(FA + MISS)/TOTAL``, where:
+    - ``TOTAL` is the duration of the union of reference and system speaker
+      segments; if the reference speaker was not paired with a system speaker,
+      it is the duration of all reference speaker segments
+    - ``FA`` is the total system speaker time not attributed to the reference
+      speaker; if the reference speaker was not paired with a system speaker,
+      it is 0
+    - ``MISS`` is the total reference speaker time not attributed to the
+      system speaker; if the reference speaker was not paired with a system
+      speaker, it is equal to ``TOTAL``
+    The Jaccard error rate then is the average of the speaker specific Jaccard
+    error rates.
+
+    Parameters
+    ----------
+    file_to_ref_durs : dict
+        Mapping from files to durations of reference speakers in those files.
+
+    file_to_sys_durs : dict
+        Mapping from files to durations of system speakers in those files.
+
+    file_to_cm : dict
+        Mapping from files to contingency matrices for speakers in those files.
+
+    Returns
+    -------
+    file_to_jer : dict
+        Mapping from files to Jaccard error rates (in percent) for those files.
+
+    global_jer : float
+        Overall Jaccard error rate (in percent).
+
+    References
+    ----------
+    https://en.wikipedia.org/wiki/Jaccard_index
+    """
+    ref_dur_fids = set(file_to_ref_durs.keys())
+    sys_dur_fids = set(file_to_sys_durs.keys())
+    cm_fids = set(file_to_cm.keys())
+    if not ref_dur_fids == sys_dur_fids == cm_fids:
+        raise ValueError(
+            'All passed dicts must have same keys.')
+    file_ids = ref_dur_fids
+    file_to_jer = {}
+    all_speaker_jers = []
+    n_ref_speakers_global = 0
+    n_sys_speakers_global = 0
+    for file_id in file_ids:
+        ref_durs = file_to_ref_durs[file_id]
+        sys_durs = file_to_sys_durs[file_id]
+        cm = file_to_cm[file_id]
+        n_ref_speakers = ref_durs.size
+        n_sys_speakers = sys_durs.size
+        n_ref_speakers_global += n_ref_speakers
+        n_sys_speakers_global += n_sys_speakers
+
+        # Handle edge cases where either reference or system segmentation
+        # posited no speech.
+        if n_ref_speakers == 0 and n_sys_speakers > 0:
+            # Case 1: no reference speech.
+            file_to_jer[file_id] = 100.0
+            continue
+        elif n_ref_speakers > 0 and n_sys_speakers == 0:
+            # Case 2: no system speech.
+            file_to_jer[file_id] = 100.0
+            all_speaker_jers.extend([100.]*n_ref_speakers)
+            continue
+        elif n_ref_speakers == 0 and n_sys_speakers == 0:
+            # Case 3: no reference or system speech
+            file_to_jer[file_id] = 0.0
+            continue
+
+        # Determine all speaker-level JER.
+        ref_durs = np.tile(ref_durs, [n_sys_speakers, 1]).T
+        sys_durs = np.tile(sys_durs, [n_ref_speakers, 1])
+        intersect = cm
+        union = ref_durs + sys_durs - intersect
+        jer_speaker = 1 - intersect / union
+
+        # Find dominant mapping by Hungarian algorithm (scipy >= 0.17) and compute
+        # JER.
+        ref_speaker_inds, sys_speaker_inds = linear_sum_assignment(jer_speaker)
+        jers = np.ones(n_ref_speakers, dtype='float64')
+        for ref_speaker_ind, sys_speaker_ind in zip(
+                ref_speaker_inds, sys_speaker_inds):
+            jers[ref_speaker_ind] = jer_speaker[ref_speaker_ind,
+                                                sys_speaker_ind]
+        jers *= 100.
+        file_to_jer[file_id] = jers.mean()
+        all_speaker_jers.extend(jers)
+
+    # Determine global JER.
+    if n_ref_speakers_global == 0 and n_sys_speakers_global > 0:
+        # Case 1: no reference speech on ANY file.
+        global_jer = 100.
+    elif n_ref_speakers_global > 0 and n_sys_speakers_global == 0:
+        # Case 2: no system speech on ANY file.
+        global_jer = 100.
+    elif n_ref_speakers_global == n_sys_speakers_global == 0:
+        # Case 3: no reference OR system speech on ANY file.
+        global_jer = 0.0
+    else:
+        # General case: at least 1 reference and 1 system speaker present.
+        global_jer = np.mean(all_speaker_jers)
+
+    return file_to_jer, global_jer
