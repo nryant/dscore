@@ -157,7 +157,7 @@ def test_jer():
     # Edge case: no reference OR system speech.
     ref_durs = np.array([], dtype='int64')
     sys_durs = np.array([], dtype='int64')
-    cm = np.zeros([], dtype='int64')
+    cm = np.zeros((0, 0), dtype='int64')
     file_to_jer, global_jer = jer(
         dict(F=ref_durs), dict(F=sys_durs), dict(F=cm))
     assert file_to_jer['F'] == 0.
