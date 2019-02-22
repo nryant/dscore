@@ -67,6 +67,7 @@ def turns_to_frames(turns, score_regions, step=0.010):
     return X
 
 
+# TODO: Consider mapping all speech overlaps to a single class.
 def flatten_labels(labels):
     """Helper function to convert output of ``turns_to_frames`` to 1-D array of
     unique values.
@@ -149,7 +150,8 @@ class Scores(namedtuple(
     __slots__ = ()
 
 
-def score(ref_turns, sys_turns, uem, step=0.010, nats=False, **kwargs):
+def score(ref_turns, sys_turns, uem, step=0.010, nats=False, jer_min_ref_dur=0.0,
+          **kwargs):
     """Score diarization.
 
     Parameters
@@ -172,6 +174,14 @@ def score(ref_turns, sys_turns, uem, step=0.010, nats=False, **kwargs):
         Otherwise, use bits.
         (Default: False)
 
+    jer_min_ref_dur : float, optional
+        Minimum reference speaker duration in seconds for JER calculation.
+        Reference speakers with durations less than ``min_ref_dur`` will be
+        excluded for scoring purposes. Setting this to a small non-zero number
+        may stabilize JER when the reference segmentation contains multiple
+        extraneous speakers.
+        (Default: 0.0)
+
     kwargs
         Keyword arguments to be passed to ``metrics.der``.
 
@@ -183,6 +193,9 @@ def score(ref_turns, sys_turns, uem, step=0.010, nats=False, **kwargs):
     global_scores : Scores
         Global scores.
     """
+    if jer_min_ref_dur is not None:
+        jer_min_ref_dur = int(jer_min_ref_dur/step)
+
     # Build contingency matrices.
     file_to_ref_turns = {
         fid : list(g) for fid, g in groupby(ref_turns, lambda x: x.file_id)}
@@ -218,7 +231,7 @@ def score(ref_turns, sys_turns, uem, step=0.010, nats=False, **kwargs):
 
     # Compute JER.
     file_to_jer, global_jer = metrics.jer(
-        file_to_ref_durs, file_to_sys_durs, file_to_jer_cm)
+        file_to_ref_durs, file_to_sys_durs, file_to_jer_cm, jer_min_ref_dur)
 
     # Compute clustering metrics.
     def compute_metrics(fid, cm, der, jer):

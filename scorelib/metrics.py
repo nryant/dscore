@@ -505,7 +505,7 @@ def der(ref_turns, sys_turns, collar=0.0, ignore_overlaps=False, uem=None):
     return file_to_der, global_der
 
 
-def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
+def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm, min_ref_dur=0):
     """Return Jacard error rate.
 
     Jaccard error rate (JER) rate is based on the Jaccard index, a similarity
@@ -518,9 +518,9 @@ def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
     speakers. An optimal mapping between speakers is determined using the
     Hungarian algorithm so that each reference speaker is paired with at most
     one system speaker and each system speaker with at most one reference
-    speaker. Then, for each reference speaker ``ref` the speaker-specific
+    speaker. Then, for each reference speaker ``ref`` the speaker-specific
     Jaccard error rate is ``(FA + MISS)/TOTAL``, where:
-    - ``TOTAL` is the duration of the union of reference and system speaker
+    - ``TOTAL`` is the duration of the union of reference and system speaker
       segments; if the reference speaker was not paired with a system speaker,
       it is the duration of all reference speaker segments
     - ``FA`` is the total system speaker time not attributed to the reference
@@ -532,6 +532,15 @@ def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
     The Jaccard error rate then is the average of the speaker specific Jaccard
     error rates.
 
+    JER and DER are highly correlated with JER typically being higher, especially
+    in recordings where one or more speakers is particularly dominant. Where it
+    tends to track DER is in outliers where the diarization is especially bad,
+    resulting on one or more unmapped system speakers whose speech is not then
+    penalized. In these cases, where DER can easily exceed 500%, JER will never
+    exceed 100% and may be far lower if the reference speakers are handled
+    correctly. For this reason, it may be useful to pair JER with another metric
+    evaluating speech detection and/or speaker overlap detection.
+
     Parameters
     ----------
     file_to_ref_durs : dict
@@ -542,6 +551,13 @@ def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
 
     file_to_cm : dict
         Mapping from files to contingency matrices for speakers in those files.
+
+    min_ref_dur : float, optional
+        Minimum reference speaker duration. Reference speakers with durations
+        less than ``min_ref_dur`` will be excluded for scoring purposes. Setting
+        this to a small non-zero number may stabilize JER when the reference
+        segmentation contains multiple extraneous speakers.
+        (Default: 0.0)
 
     Returns
     -------
@@ -555,6 +571,8 @@ def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
     ----------
     https://en.wikipedia.org/wiki/Jaccard_index
     """
+    # TODO: Explore treating non-speech as additional speaker for computation to
+    #       more gracefully deal with exceptionally poor system performance.
     ref_dur_fids = set(file_to_ref_durs.keys())
     sys_dur_fids = set(file_to_sys_durs.keys())
     cm_fids = set(file_to_cm.keys())
@@ -567,9 +585,13 @@ def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm):
     n_ref_speakers_global = 0
     n_sys_speakers_global = 0
     for file_id in file_ids:
+        # Filter.
         ref_durs = file_to_ref_durs[file_id]
         sys_durs = file_to_sys_durs[file_id]
         cm = file_to_cm[file_id]
+        ref_keep = ref_durs >= min_ref_dur
+        ref_durs = ref_durs[ref_keep]
+        cm = cm[ref_keep, ]
         n_ref_speakers = ref_durs.size
         n_sys_speakers = sys_durs.size
         n_ref_speakers_global += n_ref_speakers

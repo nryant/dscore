@@ -234,6 +234,10 @@ def main():
         '--ignore_overlaps', action='store_true', default=False,
         help='ignore overlaps when computing DER')
     parser.add_argument(
+        '--jer_min_ref_dur', nargs=None, default=0.0, metavar='FLOAT',
+        help='minimum reference speaker duration for JER '
+        '(default: %(default)s)')
+    parser.add_argument(
         '--step', nargs=None, default=0.010, type=float, metavar='FLOAT',
         help='step size in seconds (default: %(default)s)')
     parser.add_argument(
@@ -296,7 +300,8 @@ def main():
     info('Scoring...', file=sys.stderr)
     check_for_empty_files(ref_turns, sys_turns, uem)
     file_scores, global_scores = score(
-        ref_turns, sys_turns, uem, step=args.step, collar=args.collar,
+        ref_turns, sys_turns, uem, step=args.step,
+        jer_min_ref_dur=args.jer_min_ref_dur, collar=args.collar,
         ignore_overlaps=args.ignore_overlaps)
     print_table(
         file_scores, global_scores, args.n_digits, args.table_format)
