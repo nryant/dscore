@@ -1,4 +1,5 @@
 """Functions for scoring frame-level diarization output."""
+# TODO: Module is too long. Refactor.
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -10,32 +11,64 @@ import subprocess
 import tempfile
 
 import numpy as np
-from scipy.sparse import coo_matrix
+from scipy.optimize import linear_sum_assignment
+from scipy.sparse import coo_matrix, issparse
 
 from .rttm import write_rttm
 from .uem import gen_uem, write_uem
 from .utils import clip, xor
 
 __all__ = ['bcubed', 'conditional_entropy', 'contingency_matrix', 'der',
-           'goodman_kruskal_tau', 'mutual_information']
+           'goodman_kruskal_tau', 'jer', 'mutual_information']
 
 
 EPS = np.finfo(float).eps
 
 
 def contingency_matrix(ref_labels, sys_labels):
-    """Return contingency matrix between ``ref_labels`` and ``sys_labels``."""
-    ref_classes, ref_class_inds = np.unique(ref_labels, return_inverse=True)
-    sys_classes, sys_class_inds = np.unique(sys_labels, return_inverse=True)
-    n_frames = ref_labels.size
-    # Following works because coo_matrix sums duplicate entries. Is roughly
-    # twice as fast as np.histogram2d.
-    cmatrix = coo_matrix(
-        (np.ones(n_frames), (ref_class_inds, sys_class_inds)),
-        shape=(ref_classes.size, sys_classes.size),
-        dtype=np.int)
-    cmatrix = cmatrix.toarray()
-    return cmatrix, ref_classes, sys_classes
+    """Return contingency matrix between ``ref_labels`` and ``sys_labels``.
+
+    Parameters
+    ----------
+    ref_labels : ndarray, (n_samples,) or (n_samples, n_ref_classes)
+        Reference labels encoded using one-hot scheme.
+
+    sys_labels : ndarray, (n_samples,) or ((n_samples, n_sys_classes)
+        System labels encoded using one-hot scheme.
+
+    Returns
+    -------
+    cm : ndarray, (n_ref_classes, n_sys_classes)
+        Contigency matrix whose ``i, j``-th entry is the number of times the
+        ``i``-th reference label and ``j``-th system label co-occur.
+    """
+    if ref_labels.ndim != sys_labels.ndim:
+        raise ValueError(
+            'ref_labels and sys_labels should either both be 1D arrays of '
+            'labels or both be 2D arrays of one-hot encoded labels: shapes '
+            'are %r, %r' % (ref_labels.shape, sys_labels.shape))
+    if ref_labels.shape[0] != sys_labels.shape[0]:
+        raise ValueError(
+            'ref_labels and sys_labels must have same size: received %d '
+            'and %d' % (ref_labels.shape[0], sys_labels.shape[0]))
+    if ref_labels.ndim == 1:
+        ref_classes, ref_class_inds = np.unique(
+            ref_labels, return_inverse=True)
+        sys_classes, sys_class_inds = np.unique(
+            sys_labels, return_inverse=True)
+        n_frames = ref_labels.size
+        cm = coo_matrix(
+            (np.ones(n_frames), (ref_class_inds, sys_class_inds)),
+            shape=(ref_classes.size, sys_classes.size),
+            dtype=np.int)
+        cm = cm.toarray()
+    else:
+        ref_labels = ref_labels.astype('int64', copy=False)
+        sys_labels = sys_labels.astype('int64', copy=False)
+        cm = ref_labels.T.dot(sys_labels)
+        if issparse(cm):
+            cm = cm.toarray()
+    return cm
 
 
 def bcubed(ref_labels, sys_labels, cm=None):
@@ -80,7 +113,7 @@ def bcubed(ref_labels, sys_labels, cm=None):
     chains." Proceedings of LREC 1998.
     """
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
     cm = cm.astype('float64')
     cm_norm = cm / cm.sum()
     precision = np.sum(cm_norm * (cm / cm.sum(axis=0)))
@@ -127,7 +160,7 @@ def goodman_kruskal_tau(ref_labels, sys_labels, cm=None):
       Variables. https://CRAN.R-project.org/package=GoodmanKruskal.
     """
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
     cm = cm.astype('float64')
     cm = cm / cm.sum()
     ref_marginals = cm.sum(axis=1)
@@ -196,7 +229,7 @@ def conditional_entropy(ref_labels, sys_labels, cm=None, nats=False):
     """
     log = np.log if nats else np.log2
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
     sys_marginals = cm.sum(axis=0)
     N = cm.sum()
     ref_inds, sys_inds = np.nonzero(cm)
@@ -273,7 +306,7 @@ def mutual_information(ref_labels, sys_labels, cm=None, nats=False,
         raise ValueError('"%s" is not a valid NMI normalization method.')
     log = np.log if nats else np.log2
     if cm is None:
-        cm, _, _ = contingency_matrix(ref_labels, sys_labels)
+        cm = contingency_matrix(ref_labels, sys_labels)
 
     # Special cases in which one or more of H(ref) and H(sys) is
     # 0.
@@ -282,7 +315,7 @@ def mutual_information(ref_labels, sys_labels, cm=None, nats=False,
         # Case 1: MI is by definition 0 as should be NMI, regardless of
         #         normalization.
         return 0.0, 0.0
-    elif n_ref_classes == n_sys_classes == 1:
+    if n_ref_classes == n_sys_classes == 1:
         # Case 2: MI is 0, but as the data is not split, each clustering
         #         is perfectly predictive of the other, so set NMI to 1.
         return 0.0, 1.0
@@ -388,8 +421,12 @@ def der(ref_turns, sys_turns, collar=0.0, ignore_overlaps=False, uem=None):
 
     Returns
     -------
-    der : float
-        Overall percent diarization error.
+    file_to_der : dict
+        Mapping from files to diarization error rates (in percent) for those
+        files.
+
+    global_der : float
+        Overall diarization error rate (in percent).
 
     References
     ----------
@@ -466,3 +503,147 @@ def der(ref_turns, sys_turns, collar=0.0, ignore_overlaps=False, uem=None):
     global_der = file_to_der_base['ALL']
 
     return file_to_der, global_der
+
+
+def jer(file_to_ref_durs, file_to_sys_durs, file_to_cm, min_ref_dur=0):
+    """Return Jacard error rate.
+
+    Jaccard error rate (JER) rate is based on the Jaccard index, a similarity
+    measure used to evaluate the output of image segmentation systems. An
+    optimal mapping between reference and system speakers is determined and
+    for each pair the Jaccard index is computed. The Jaccard error rate is then
+    defined as 1 minus the average of these scores.
+
+    More concretely, assume we have ``N`` reference speakers and ``M`` system
+    speakers. An optimal mapping between speakers is determined using the
+    Hungarian algorithm so that each reference speaker is paired with at most
+    one system speaker and each system speaker with at most one reference
+    speaker. Then, for each reference speaker ``ref`` the speaker-specific
+    Jaccard error rate is ``(FA + MISS)/TOTAL``, where:
+    - ``TOTAL`` is the duration of the union of reference and system speaker
+      segments; if the reference speaker was not paired with a system speaker,
+      it is the duration of all reference speaker segments
+    - ``FA`` is the total system speaker time not attributed to the reference
+      speaker; if the reference speaker was not paired with a system speaker,
+      it is 0
+    - ``MISS`` is the total reference speaker time not attributed to the
+      system speaker; if the reference speaker was not paired with a system
+      speaker, it is equal to ``TOTAL``
+    The Jaccard error rate then is the average of the speaker specific Jaccard
+    error rates.
+
+    JER and DER are highly correlated with JER typically being higher, especially
+    in recordings where one or more speakers is particularly dominant. Where it
+    tends to track DER is in outliers where the diarization is especially bad,
+    resulting on one or more unmapped system speakers whose speech is not then
+    penalized. In these cases, where DER can easily exceed 500%, JER will never
+    exceed 100% and may be far lower if the reference speakers are handled
+    correctly. For this reason, it may be useful to pair JER with another metric
+    evaluating speech detection and/or speaker overlap detection.
+
+    Parameters
+    ----------
+    file_to_ref_durs : dict
+        Mapping from files to durations of reference speakers in those files.
+
+    file_to_sys_durs : dict
+        Mapping from files to durations of system speakers in those files.
+
+    file_to_cm : dict
+        Mapping from files to contingency matrices for speakers in those files.
+
+    min_ref_dur : float, optional
+        Minimum reference speaker duration. Reference speakers with durations
+        less than ``min_ref_dur`` will be excluded for scoring purposes. Setting
+        this to a small non-zero number may stabilize JER when the reference
+        segmentation contains multiple extraneous speakers.
+        (Default: 0.0)
+
+    Returns
+    -------
+    file_to_jer : dict
+        Mapping from files to Jaccard error rates (in percent) for those files.
+
+    global_jer : float
+        Overall Jaccard error rate (in percent).
+
+    References
+    ----------
+    https://en.wikipedia.org/wiki/Jaccard_index
+    """
+    # TODO: Explore treating non-speech as additional speaker for computation to
+    #       more gracefully deal with exceptionally poor system performance.
+    ref_dur_fids = set(file_to_ref_durs.keys())
+    sys_dur_fids = set(file_to_sys_durs.keys())
+    cm_fids = set(file_to_cm.keys())
+    if not ref_dur_fids == sys_dur_fids == cm_fids:
+        raise ValueError(
+            'All passed dicts must have same keys.')
+    file_ids = ref_dur_fids
+    file_to_jer = {}
+    all_speaker_jers = []
+    n_ref_speakers_global = 0
+    n_sys_speakers_global = 0
+    for file_id in file_ids:
+        # Filter.
+        ref_durs = file_to_ref_durs[file_id]
+        sys_durs = file_to_sys_durs[file_id]
+        cm = file_to_cm[file_id]
+        ref_keep = ref_durs >= min_ref_dur
+        ref_durs = ref_durs[ref_keep]
+        cm = cm[ref_keep, ]
+        n_ref_speakers = ref_durs.size
+        n_sys_speakers = sys_durs.size
+        n_ref_speakers_global += n_ref_speakers
+        n_sys_speakers_global += n_sys_speakers
+
+        # Handle edge cases where either reference or system segmentation
+        # posited no speech.
+        if n_ref_speakers == 0 and n_sys_speakers > 0:
+            # Case 1: no reference speech.
+            file_to_jer[file_id] = 100.0
+            continue
+        elif n_ref_speakers > 0 and n_sys_speakers == 0:
+            # Case 2: no system speech.
+            file_to_jer[file_id] = 100.0
+            all_speaker_jers.extend([100.]*n_ref_speakers)
+            continue
+        elif n_ref_speakers == 0 and n_sys_speakers == 0:
+            # Case 3: no reference or system speech
+            file_to_jer[file_id] = 0.0
+            continue
+
+        # Determine all speaker-level JER.
+        ref_durs = np.tile(ref_durs, [n_sys_speakers, 1]).T
+        sys_durs = np.tile(sys_durs, [n_ref_speakers, 1])
+        intersect = cm
+        union = ref_durs + sys_durs - intersect
+        jer_speaker = 1 - intersect / union
+
+        # Find dominant mapping by Hungarian algorithm (scipy >= 0.17) and compute
+        # JER.
+        ref_speaker_inds, sys_speaker_inds = linear_sum_assignment(jer_speaker)
+        jers = np.ones(n_ref_speakers, dtype='float64')
+        for ref_speaker_ind, sys_speaker_ind in zip(
+                ref_speaker_inds, sys_speaker_inds):
+            jers[ref_speaker_ind] = jer_speaker[ref_speaker_ind,
+                                                sys_speaker_ind]
+        jers *= 100.
+        file_to_jer[file_id] = jers.mean()
+        all_speaker_jers.extend(jers)
+
+    # Determine global JER.
+    if n_ref_speakers_global == 0 and n_sys_speakers_global > 0:
+        # Case 1: no reference speech on ANY file.
+        global_jer = 100.
+    elif n_ref_speakers_global > 0 and n_sys_speakers_global == 0:
+        # Case 2: no system speech on ANY file.
+        global_jer = 100.
+    elif n_ref_speakers_global == n_sys_speakers_global == 0:
+        # Case 3: no reference OR system speech on ANY file.
+        global_jer = 0.0
+    else:
+        # General case: at least 1 reference and 1 system speaker present.
+        global_jer = np.mean(all_speaker_jers)
+
+    return file_to_jer, global_jer

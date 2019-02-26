@@ -11,6 +11,7 @@ which will calculate and report the following metrics both overall and on
 a per-file basis:
 
 - diarization error rate (DER)
+- jaccard error rate (JER)
 - B-cubed precision (B3-Precision)
 - B-cubed recall (B3-Recall)
 - B-cubed F1 (B3-F1)
@@ -85,6 +86,9 @@ from scorelib.utils import error, info, warn, xor
 
 
 class RefRTTMAction(argparse.Action):
+    """Custom action to ensure that reference files are specified from a
+    script file or from the command line but not both.
+    """
     def __call__(self, parser, namespace, values, option_string=None):
         setattr(namespace, self.dest, values)
         if not xor(namespace.ref_rttm_fns, namespace.ref_rttm_scpf):
@@ -92,6 +96,9 @@ class RefRTTMAction(argparse.Action):
 
 
 class SysRTTMAction(argparse.Action):
+    """Custom action to ensure that system files are specified from a script
+    file or from the command line but not both.
+    """
     def __call__(self, parser, namespace, values, option_string=None):
         setattr(namespace, self.dest, values)
         if not xor(namespace.sys_rttm_fns, namespace.sys_rttm_scpf):
@@ -132,8 +139,8 @@ def load_rttms(rttm_fns):
 
 def check_for_empty_files(ref_turns, sys_turns, uem):
     """Warn on files in UEM without reference or speaker turns."""
-    ref_file_ids = set([turn.file_id for turn in ref_turns])
-    sys_file_ids = set([turn.file_id for turn in sys_turns])
+    ref_file_ids = {turn.file_id for turn in ref_turns}
+    sys_file_ids = {turn.file_id for turn in sys_turns}
     for file_id in sorted(iterkeys(uem)):
         if file_id not in ref_file_ids:
             warn('File "%s" missing in reference RTTMs.' % file_id)
@@ -153,7 +160,7 @@ def load_script_file(fn):
         return [line.decode('utf-8').strip() for line in f]
 
 
-def print_table(file_to_scores, global_scores, n_digits=2,
+def print_table(file_scores, global_scores, n_digits=2,
                 table_format='simple'):
     """Pretty print scores as table.
 
@@ -175,6 +182,7 @@ def print_table(file_to_scores, global_scores, n_digits=2,
     """
     col_names = ['File',
                  'DER', # Diarization error rate.
+                 'JER', # Jaccard error rate.
                  'B3-Precision', # B-cubed precision.
                  'B3-Recall', # B-cubed recall.
                  'B3-F1', # B-cubed F1.
@@ -185,27 +193,16 @@ def print_table(file_to_scores, global_scores, n_digits=2,
                  'MI', # Mutual information.
                  'NMI', # Normalized mutual information.
                 ]
-    rows = []
-    for file_id in sorted(iterkeys(file_to_scores)):
-        scores = file_to_scores[file_id]
-        row = [file_id, scores.der, scores.bcubed_precision,
-               scores.bcubed_recall, scores.bcubed_f1, scores.tau_ref_sys,
-               scores.tau_sys_ref, scores.ce_ref_sys, scores.ce_sys_ref,
-               scores.mi, scores.nmi]
-        rows.append(row)
-    rows.append(['*** OVERALL ***', global_scores.der, global_scores.bcubed_precision,
-                 global_scores.bcubed_recall, global_scores.bcubed_f1,
-                 global_scores.tau_ref_sys, global_scores.tau_sys_ref,
-                 global_scores.ce_ref_sys, global_scores.ce_sys_ref,
-                 global_scores.mi, global_scores.nmi])
+    rows = sorted(file_scores, key=lambda x: x.file_id)
+    rows.append(global_scores._replace(file_id='*** OVERALL ***'))
     floatfmt = '.%df' % n_digits
     tbl = tabulate(
         rows, headers=col_names, floatfmt=floatfmt, tablefmt=table_format)
     print(tbl)
 
 
-
-if __name__ == '__main__':
+def main():
+    """Main."""
     # Parse command line arguments.
     parser = ArgumentParser(
         description='Score diarization from RTTM files.', add_help=True,
@@ -237,6 +234,10 @@ if __name__ == '__main__':
         '--ignore_overlaps', action='store_true', default=False,
         help='ignore overlaps when computing DER')
     parser.add_argument(
+        '--jer_min_ref_dur', nargs=None, default=0.0, metavar='FLOAT',
+        help='minimum reference speaker duration for JER '
+        '(default: %(default)s)')
+    parser.add_argument(
         '--step', nargs=None, default=0.010, type=float, metavar='FLOAT',
         help='step size in seconds (default: %(default)s)')
     parser.add_argument(
@@ -260,19 +261,19 @@ if __name__ == '__main__':
         args.ref_rttm_fns = load_script_file(args.ref_rttm_scpf)
     if args.sys_rttm_scpf is not None:
         args.sys_rttm_fns = load_script_file(args.sys_rttm_scpf)
-    if len(args.ref_rttm_fns) < 1:
+    if not args.ref_rttm_fns:
         error('No reference RTTMs specified.')
         sys.exit(1)
-    if len(args.sys_rttm_fns) < 1:
+    if not args.sys_rttm_fns:
         error('No system RTTMs specified.')
         sys.exit(1)
 
     # Load speaker/reference speaker turns and UEM. If no UEM specified,
     # determine it automatically.
     info('Loading speaker turns from reference RTTMs...', file=sys.stderr)
-    ref_turns, ref_file_ids = load_rttms(args.ref_rttm_fns)
+    ref_turns, _ = load_rttms(args.ref_rttm_fns)
     info('Loading speaker turns from system RTTMs...', file=sys.stderr)
-    sys_turns, sys_file_ids = load_rttms(args.sys_rttm_fns)
+    sys_turns, _ = load_rttms(args.sys_rttm_fns)
     if args.uemf is not None:
         info('Loading universal evaluation map...', file=sys.stderr)
         uem = load_uem(args.uemf)
@@ -296,8 +297,15 @@ if __name__ == '__main__':
     sys_turns = merge_turns(sys_turns)
 
     # Score.
+    info('Scoring...', file=sys.stderr)
     check_for_empty_files(ref_turns, sys_turns, uem)
-    file_to_scores, global_scores = score(
-        ref_turns, sys_turns, uem, args.collar, args.ignore_overlaps,
-        args.step)
-    print_table(file_to_scores, global_scores, args.n_digits, args.table_format)
+    file_scores, global_scores = score(
+        ref_turns, sys_turns, uem, step=args.step,
+        jer_min_ref_dur=args.jer_min_ref_dur, collar=args.collar,
+        ignore_overlaps=args.ignore_overlaps)
+    print_table(
+        file_scores, global_scores, args.n_digits, args.table_format)
+
+
+if __name__ == '__main__':
+    main()

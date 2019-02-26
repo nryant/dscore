@@ -2,11 +2,12 @@
 from __future__ import absolute_import
 from __future__ import print_function
 from __future__ import unicode_literals
+import itertools
 import sys
 
 from . import six
 
-__all__ = ['clip', 'error', 'format_float', 'info', 'warn', 'xor']
+__all__ = ['clip', 'error', 'format_float', 'groupby', 'info', 'warn', 'xor']
 
 
 def error(msg, file=sys.stderr):
@@ -63,3 +64,10 @@ def format_float(x, n_digits=3):
 def clip(x, lower, upper):
     """Clip ``x`` to [``lower``, ``upper``]."""
     return min(max(x, lower), upper)
+
+
+def groupby(iterable, keyfunc):
+    """Wrapper around ``itertools.groupby`` which sorts data first."""
+    iterable = sorted(iterable, key=keyfunc)
+    for key, group in itertools.groupby(iterable, keyfunc):
+        yield key, group
