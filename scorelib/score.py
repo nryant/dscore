@@ -3,7 +3,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 
 import numpy as np
 from scipy.linalg import block_diag
@@ -197,10 +197,12 @@ def score(ref_turns, sys_turns, uem, step=0.010, nats=False, jer_min_ref_dur=0.0
         jer_min_ref_dur = int(jer_min_ref_dur/step)
 
     # Build contingency matrices.
-    file_to_ref_turns = {
-        fid : list(g) for fid, g in groupby(ref_turns, lambda x: x.file_id)}
-    file_to_sys_turns = {
-        fid : list(g) for fid, g in groupby(sys_turns, lambda x: x.file_id)}
+    file_to_ref_turns = defaultdict(
+        list,
+        {fid : list(g) for fid, g in groupby(ref_turns, lambda x: x.file_id)})
+    file_to_sys_turns =defaultdict(
+        list,
+        {fid : list(g) for fid, g in groupby(sys_turns, lambda x: x.file_id)})
     file_to_cm = {} # Map from files to contingency matrices used by
                     # clustering metrics.
     file_to_jer_cm = {} # Map from files to contingency matrices used by
