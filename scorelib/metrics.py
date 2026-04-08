@@ -60,7 +60,7 @@ def contingency_matrix(ref_labels, sys_labels):
         cm = coo_matrix(
             (np.ones(n_frames), (ref_class_inds, sys_class_inds)),
             shape=(ref_classes.size, sys_classes.size),
-            dtype=np.int)
+            dtype=np.int64)
         cm = cm.toarray()
     else:
         ref_labels = ref_labels.astype('int64', copy=False)
